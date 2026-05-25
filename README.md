@@ -1,4 +1,4 @@
-# Seizure Detection
+# NEO Seizure Detection
 
 Run this command to generate 1 minute of synthetic data with seizures:
 
