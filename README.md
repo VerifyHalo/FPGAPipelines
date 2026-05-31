@@ -140,3 +140,62 @@ The PC (`run_tests.py`) reads events from PipeOut 0xA0 and logs them with channe
 
 See `run_halo_log.txt` for outputs.
 
+---
+
+## Design Verification
+
+Unit tests live in `sim/`. Run without an FPGA or Xilinx tools:
+
+```bash
+cd sim
+make sim          # compile + run all tests
+make waves        # open waveform in GTKWave
+```
+
+A behavioral `fifo_generator_0.sv` stub replaces the Xilinx FIFO IP for simulation. SVA concurrent assertions (`sim/datapath_assertions.sv`) are provided separately for Questa or Vivado sim.
+
+---
+
+### Tested Edge Cases
+
+#### TEST 1. Flat signal at midpoint produces no detection
+A constant signal at 32768 (the ADC zero point) is sent to a channel. Because all three history samples are identical, NEO = x[n]² − x[n−1]·x[n+1] = 0. GOAL: Verify that baseline neural activity never triggers a false seizure event.
+
+#### TEST 2. Single spike produces a known nonzero NEO value
+Two midpoint samples fill the history, then one spike (32868, i.e. +100 µV centered) is injected followed by four trailing midpoints to flush the pipeline. Verifies the NEO formula is computed correctly: with neighbors at 0 and center at +100, NEO = 100² = 10,000 != 0.
+
+#### TEST 3. State machine transitions NORMAL - SEIZURE
+An alternating spike/midpoint pattern is used. Each spike sample produces NEO ≈ 53,824, well above the test threshold of 50. After `transition_count = 3` consecutive detections the FSM must fire `output_valid = 1` with `output_event = 1` on channel 0.
+
+#### TEST 4. State machine transitions SEIZURE - NORMAL on timeout
+Builds on TEST 3. First confirms seizure start fires (phase A), then sends 20 flat midpoint samples. Because NEO = 0 for a flat signal, `window_timeout = 5` samples without a detection causes the FSM to transition back to NORMAL.
+
+#### TEST 5. Multi-channel isolation
+Channels 0 and 1 are driven simultaneously (interleaved sample-by-sample). Channel 0 receives an alternating spike/mid pattern; channel 1 receives only midpoints. Verifies two things:
+1. Ch0 correctly accumulates detections and fires a seizure start.
+2. Ch1 never fires, confirming that per-channel state (history, counters, FSM) is fully independent.
+
+#### TEST 6. No detection before three samples arrive (NEO window size)
+A channel receives only two samples (extreme values: 0xFFFF and 0x0000) before the test ends. The NEO operator requires three consecutive samples to define x[n−1], x[n], x[n+1]. With `threshold = 1` and `transition_count = 1` (would fire immediately if NEO ran early), verifies that no event is generated while the history buffer is still filling.
+
+#### TEST 7. Hard reset clears all per-channel state
+A seizure is triggered on channel 0, then `rst_n` is asserted mid-seizure for four clock cycles and released. Fifteen flat midpoint samples are then sent. Verifies that no stale event fires after reset. Confirms that channel history, counters, FSM state, and pipeline registers are all cleared.
+
+> **Bug found and fixed**: `neo_val` and `neo_abs` were absent from the reset block.
+
+#### TEST 8. `output_valid` is a single-cycle pulse
+Triggers a seizure start and monitors `output_valid` for 60 clock cycles. Counts the number of cycles `output_valid` is high. Verifies the count is lower-equal to 1.
+
+---
+
+### Inline Assertion Monitors
+
+contains 3 procedural monitors:
+
+| Monitor | What it checks |
+|---------|----------------|
+| Pulse width | `output_valid` must not be held high for more than one consecutive clock cycle |
+| Output channel range | `output_channel` must be < 32 whenever `output_valid` is asserted |
+| Input channel range | `channel_id` must be < 32 whenever `data_valid` is asserted |
+
+Print an `[ASSERT]` error line without stopping the simulation.

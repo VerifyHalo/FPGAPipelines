@@ -116,6 +116,11 @@ module datapath (
     logic        detected_pipe;
     logic [5:0]  channel_id_pipe;
     logic        data_valid_pipe;
+
+    // Combinational Stage 1 wires: compute NEO directly from Stage 0 registers
+    // (avoids 1-cycle lag and cross-channel contamination via registered neo_val/neo_abs)
+    wire signed [33:0] neo_next     = curr_sq_pipe - neigh_mul_pipe;
+    wire        [33:0] neo_abs_next = neo_next[33] ? (~neo_next + 34'd1) : neo_next;
     
     // ========================================================================
     // DATAPATH RESTORATION - STEP BY STEP
@@ -155,6 +160,8 @@ module datapath (
             neigh_mul_pipe    <= 34'd0;
             channel_id_sq_pipe<= 6'd0;
             data_valid_sq_pipe<= 1'b0;
+            neo_val           <= 34'd0;
+            neo_abs           <= 34'd0;
             neo_abs_pipe      <= 34'd0;
             detected_pipe     <= 1'b0;
             channel_id_pipe   <= 6'd0;
@@ -211,18 +218,19 @@ module datapath (
             // STAGE 1: NEO subtract/abs/threshold (ENABLED)
             // ====================================================================
             if (data_valid_sq_pipe) begin
-                neo_val <= curr_sq_pipe - neigh_mul_pipe;
-                neo_abs <= neo_val[33] ? (~neo_val + 1'b1) : neo_val;
+                // Register for debug/waveform only — not used for detection
+                neo_val <= neo_next;
+                neo_abs <= neo_abs_next;
 
-                // Threshold comparison and debug
-                detected          <= (neo_abs > threshold_value);
-                neo_debug         <= neo_abs[16:0];
+                // Use combinational neo_abs_next to avoid 1-cycle lag and
+                // cross-channel contamination via stale neo_val/neo_abs registers
+                detected          <= (neo_abs_next > threshold_value);
+                neo_debug         <= neo_abs_next[16:0];
                 neo_debug_valid   <= 1'b1;
-                detected_debug    <= detected;
+                detected_debug    <= (neo_abs_next > threshold_value);
 
-                // Register NEO / detection info for gating in next cycle
-                neo_abs_pipe      <= neo_abs;
-                detected_pipe     <= detected;
+                neo_abs_pipe      <= neo_abs_next;
+                detected_pipe     <= (neo_abs_next > threshold_value);
                 channel_id_pipe   <= channel_id_sq_pipe;
                 data_valid_pipe   <= 1'b1;
             end
@@ -304,5 +312,5 @@ module datapath (
         end
     end
 
-endmodule
 
+endmodule
