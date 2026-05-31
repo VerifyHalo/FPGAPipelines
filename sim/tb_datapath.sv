@@ -140,17 +140,17 @@ module tb_datapath;
         end
     endtask
 
-    // Extra cycles for pipeline to flush (Stage0→Stage1→Stage2 = 2 cycles,
+    // Extra cycles for pipeline to flush (Stage0 -> Stage1 -> Stage2 = 2 cycles,
     // plus neo_abs 1-cycle lag = 3 total; give 20 for margin)
     task drain;
         repeat (20) @(posedge clk);
     endtask
 
     // --------------------------------------------------------
-    // TEST 1: Flat signal at midpoint → NEO=0, no event
+    // TEST 1: Flat signal at midpoint -> NEO=0, no event
     // --------------------------------------------------------
     task test_neo_flat_signal;
-        $display("\n[TEST 1] NEO: flat midpoint signal → no detection");
+        $display("\n[TEST 1] NEO: flat midpoint signal -> no detection");
         reset_dut(); clear_capture();
         threshold_value  = 32'd100;
         window_timeout   = 32'd50;
@@ -162,7 +162,7 @@ module tb_datapath;
     endtask
 
     // --------------------------------------------------------
-    // TEST 2: Single spike → nonzero NEO debug
+    // TEST 2: Single spike -> nonzero NEO debug
     // neo_abs uses neo_val from prev cycle: need 2+ trailing samples.
     // spike=32868, centered=+100, NEO=100^2=10000
     // --------------------------------------------------------
@@ -181,13 +181,13 @@ module tb_datapath;
     endtask
 
     // --------------------------------------------------------
-    // TEST 3: NORMAL → SEIZURE
+    // TEST 3: NORMAL -> SEIZURE
     // Alternating spike/mid: NEO fires on every spike sample.
-    // With threshold=50, S=232, NEO=53824 >> 50 → detected on every spike.
+    // With threshold=50, S=232, NEO=53824 >> 50 -> detected on every spike.
     // With transition_count=3: seizure fires after 3 detections + pipeline lag.
     // --------------------------------------------------------
     task test_seizure_start;
-        $display("\n[TEST 3] FSM: NORMAL → SEIZURE after %0d detections", 3);
+        $display("\n[TEST 3] FSM: NORMAL - SEIZURE after %0d detections", 3);
         reset_dut(); clear_capture();
         threshold_value  = 32'd50;
         window_timeout   = 32'd50;
@@ -202,11 +202,11 @@ module tb_datapath;
     endtask
 
     // --------------------------------------------------------
-    // TEST 4: SEIZURE → NORMAL (window timeout)
-    // Phase A triggers seizure. Phase B sends flat → timeout → end event.
+    // TEST 4: SEIZURE -> NORMAL (window timeout)
+    // Phase A triggers seizure. Phase B sends flat -> timeout -> end event.
     // --------------------------------------------------------
     task test_seizure_end;
-        $display("\n[TEST 4] FSM: SEIZURE → NORMAL on window_timeout");
+        $display("\n[TEST 4] FSM: SEIZURE - NORMAL on window_timeout");
         reset_dut();
         threshold_value  = 32'd50;
         window_timeout   = 32'd5;
@@ -219,7 +219,7 @@ module tb_datapath;
         drain();
         check("seizure start fires (phase A)", cap_valid === 1 && cap_event === 1);
 
-        // Phase B: quiet samples → timeout
+        // Phase B: quiet samples -> timeout
         clear_capture();
         send_n(0, 16'd32768, 20);   // 20 quiet > window_timeout=5
         drain();
@@ -230,7 +230,7 @@ module tb_datapath;
 
     // --------------------------------------------------------
     // TEST 5: Multi-channel isolation
-    // ch0 alternating spikes → seizure; ch1 flat → stays quiet
+    // ch0 alternating spikes -> seizure; ch1 flat -> stays quiet
     // --------------------------------------------------------
     task test_channel_isolation;
         integer k;
