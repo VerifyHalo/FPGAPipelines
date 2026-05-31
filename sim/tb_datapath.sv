@@ -258,7 +258,7 @@ module tb_datapath;
     endtask
 
     // --------------------------------------------------------
-    // TEST 6: History guard — no event when < 3 samples in history
+    // TEST 6: History guard. no event when < 3 samples in history
     // --------------------------------------------------------
     task test_history_guard;
         $display("\n[TEST 6] History guard: no event on first 2 samples");
@@ -323,6 +323,86 @@ module tb_datapath;
     endtask
 
     // --------------------------------------------------------
+    // TEST 9: NEO at ADC rail values (0 and 65535)
+    // Centered values: 0->-32768, 65535->+32767
+    // Worst-case NEO: x[n]=32767, neighbors=-32768
+    //   curr_sq  = 32767^2  = 1,073,676,289  (fits in 34-bit signed)
+    //   neigh_mul= (-32768)^2 = 1,073,741,824 (fits in 34-bit signed)
+    //   NEO      = -65535, abs = 65535
+    // Verifies 34-bit arithmetic does not overflow at extremes.
+    // --------------------------------------------------------
+    task test_neo_rail_values;
+        $display("\n[TEST 9] Overflow: NEO at ADC rail values (0 / 65535)");
+        reset_dut(); clear_capture();
+        threshold_value  = 32'd50;
+        window_timeout   = 32'd50;
+        transition_count = 32'd3;
+
+        // Alternating 65535/0 gives maximum possible NEO excursion
+        send_n(0, 16'd32768, 2);
+        send_alternating(0, 16'd65535, 16'd0, 8);
+        drain();
+        // Must still produce valid seizure detection (no silent overflow/wrap)
+        check("rail values trigger detection", cap_valid === 1);
+        check("rail event is seizure start",   cap_event === 1);
+    endtask
+
+    // --------------------------------------------------------
+    // TEST 10: detection_counter width: 8-bit counter vs 32-bit transition_count
+    // detection_counter is declared as [7:0] (max 255).
+    // If transition_count > 255 the counter wraps before reaching threshold.
+    // This test exposes the mismatch: with transition_count=256 the counter
+    // wraps to 0 at 256, so seizure never fires.
+    // EXPECTED BEHAVIOUR (correct design): no seizure when count > 8-bit max.
+    // --------------------------------------------------------
+    task test_detection_counter_overflow;
+        $display("\n[TEST 10] Overflow: detection_counter 8-bit vs 32-bit transition_count");
+        reset_dut(); clear_capture();
+        threshold_value  = 32'd50;
+        window_timeout   = 32'd50;
+        transition_count = 32'd257;   // transition_count-1=256, above 8-bit max (255)
+
+        send_n(0, 16'd32768, 2);
+        send_alternating(0, 16'd33000, 16'd32768, 150); // 150 pairs >> 256 detections
+        drain();
+        // With an 8-bit counter and transition_count=256, the counter wraps
+        // back to 0 and the seizure never fires: expose the bug.
+        check("KNOWN BUG: counter wraps, seizure never fires", cap_valid === 0);
+    endtask
+
+    // --------------------------------------------------------
+    // TEST 11: continuous_counter width. 16-bit counter vs 32-bit window_timeout
+    // continuous_counter is [15:0] (max 65535).
+    // If window_timeout > 65535 the counter wraps before timeout, so
+    // a seizure that started can never end.
+    // --------------------------------------------------------
+    task test_continuous_counter_overflow;
+        integer wait_cycles;
+        $display("\n[TEST 11] Overflow: continuous_counter 16-bit vs 32-bit window_timeout");
+        reset_dut();
+        threshold_value  = 32'd50;
+        window_timeout   = 32'd70000;  // > 65535 (16-bit max)
+        transition_count = 32'd3;
+
+        // Phase A: trigger seizure start
+        clear_capture();
+        send_n(0, 16'd32768, 2);
+        send_alternating(0, 16'd33000, 16'd32768, 8);
+        drain();
+        check("SETUP: seizure started", cap_valid === 1 && cap_event === 1);
+
+        // Phase B: send many quiet samples. counter wraps at 65535, timeout
+        // comparison (16-bit >= 32-bit 70000) is always false, seizure never ends.
+        clear_capture();
+        begin : cco_loop
+            integer k;
+            for (k = 0; k < 70010; k = k+1) send_sample(0, 16'd32768);
+        end
+        drain();
+        check("KNOWN BUG: seizure end never fires (counter wraps)", cap_valid === 0);
+    endtask
+
+    // --------------------------------------------------------
     // Run
     // --------------------------------------------------------
     initial begin
@@ -338,6 +418,9 @@ module tb_datapath;
         test_history_guard();
         test_reset_clears_state();
         test_valid_pulse_width();
+        test_neo_rail_values();
+        test_detection_counter_overflow();
+        test_continuous_counter_overflow();
 
         $display("\n====== RESULTS: %0d passed, %0d failed ======",
                  pass_count, fail_count);
