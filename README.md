@@ -186,6 +186,15 @@ A seizure is triggered on channel 0, then `rst_n` is asserted mid-seizure for fo
 #### TEST 8. `output_valid` is a single-cycle pulse
 Triggers a seizure start and monitors `output_valid` for 60 clock cycles. Counts the number of cycles `output_valid` is high. Verifies the count is lower-equal to 1.
 
+#### TEST 9. NEO arithmetic at ADC rail values (overflow check)
+The ADC range is 0–65535. Centered rail values are −32768 and +32767. The worst-case NEO product is 32767² ≈ 1.07 × 10⁹, which must fit in the 34-bit signed pipeline registers without wrapping. An alternating 65535/0 pattern is driven and seizure detection is verified — confirming the NEO multiply-and-subtract path does not silently overflow at extreme inputs.
+
+#### TEST 10. `detection_counter` width mismatch
+`detection_counter` is declared `[7:0]` (max 255) but `transition_count` is 32-bit. With `transition_count = 257` the required threshold is 256, which the 8-bit counter can never reach — it wraps to 0 at 256 and the seizure never fires regardless of how many detections occur. 150 spike/mid pairs are driven and `output_valid` is confirmed to never assert. **Known DUT bug**: `detection_counter` must be widened to match `transition_count`.
+
+#### TEST 11. `continuous_counter` width mismatch
+`continuous_counter` is declared `[15:0]` (max 65535) but `window_timeout` is 32-bit. With `window_timeout = 70000` the 16-bit counter wraps to 0 before reaching the timeout value, so `continuous_counter >= window_timeout` is never true and a seizure in progress can never end. The test triggers a seizure then drives 70,010 flat samples and confirms no seizure-end event fires. **Known DUT bug**: `continuous_counter` must be widened to at least 32 bits.
+
 ---
 
 ### Inline Assertion Monitors
