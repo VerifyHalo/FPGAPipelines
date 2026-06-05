@@ -176,7 +176,7 @@ module datapath (
             data_valid_sq_pipe<= 1'b0;
             
             // ====================================================================
-            // STAGE 0: Sample history collection per channel (RESTORED)
+            // STAGE 0: Sample history collection per channel
             // ====================================================================
             if (data_valid) begin
                 // Update timestamp for this channel
@@ -236,7 +236,7 @@ module datapath (
             end
 
             // ====================================================================
-            // STAGE 2: Gating state machine (ENABLED)
+            // STAGE 2: Gating state machine
             // ====================================================================
             // Real seizure detection: generates events based on NEO threshold crossings
             // Note: Real events take priority over test events (Stage 2 runs after test event check)

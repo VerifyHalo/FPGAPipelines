@@ -34,6 +34,9 @@ SAMPLE_SIZE_BYTES = 4 # const by Intan SDK
 CHUNK_BYTES = NUM_CHANNELS * SAMPLES_PER_CHUNK * SAMPLE_SIZE_BYTES
 MAX_EVENTS = 10000
 EVENT_BUFFER_SIZE = MAX_EVENTS * SAMPLE_SIZE_BYTES
+FIFO_OUT_DEPTH = 1024 # entries in FIFO Out (from First.sv)
+DRAIN_BUFFER_SIZE = FIFO_OUT_DEPTH * SAMPLE_SIZE_BYTES  # bytes per drain read
+DRAIN_INTERVAL = 50 # drain every N chunks to prevent FIFO Out overflow
 
 def generate_synthetic_data_chunks(num_chunks=450, samples_per_channel=60000, seed=None, log_path=None):
     """Generate synthetic neural data chunks formatted for FPGA."""
@@ -274,7 +277,16 @@ def main():
         dev.SetWireInValue(WIREIN_CTRL, 0x0000_0000, 0xFFFFFFFF)
         dev.UpdateWireIns()
         
-        # Send data
+        def check_fifo_overflow(chunk_idx):
+            """Peek at FIFO Out. If it's full, abort."""
+            buf = dev.ReadFromPipeOut(PIPE_OUT_ADDR, DRAIN_BUFFER_SIZE)
+            words_peeked = len(buf) // SAMPLE_SIZE_BYTES
+            if words_peeked >= FIFO_OUT_DEPTH:
+                log_msg(f"ASSERTION FAILED: FIFO Out overflow detected at chunk {chunk_idx} "
+                        f"({words_peeked} words >= FIFO depth {FIFO_OUT_DEPTH}).")
+                sys.exit(1)
+
+        # Send data and check FIFO Out every DRAIN_INTERVAL chunks
         log_msg(f"\n[SEND] Sending {len(chunks)} chunks to PipeIn 0x{PIPE_IN_ADDR:02X}...")
         for chunk_idx, chunk_data in enumerate(chunks):
             padded = ensure_multiple_of_16(chunk_data)
@@ -282,20 +294,21 @@ def main():
             if status < 0:
                 log_msg(f"ERROR: WriteToPipeIn failed for chunk {chunk_idx}")
                 sys.exit(1)
-            if (chunk_idx + 1) % 50 == 0:
+            if (chunk_idx + 1) % DRAIN_INTERVAL == 0:
+                check_fifo_overflow(chunk_idx + 1)
                 log_msg(f"  Sent {chunk_idx + 1}/{len(chunks)} chunks")
         log_msg(f"[DONE] Sent all {len(chunks)} chunks")
-        
+
         time.sleep(0.5)
-        
+
         # Read events (ToDo: In Parallel)
         log_msg(f"\n[READ] Reading events from PipeOut 0x{PIPE_OUT_ADDR:02X}...")
         out = dev.ReadFromPipeOut(PIPE_OUT_ADDR, EVENT_BUFFER_SIZE)
         bytes_read = len(out)
         log_msg(f"[DONE] Read {bytes_read} bytes ({bytes_read // 4} words)")
-        
+
         # Parse events: [31:30]=event_code, [29:25]=channel_id, [24:0]=timestamp
-        words = [int.from_bytes(out[i:i+4], byteorder="little") 
+        words = [int.from_bytes(out[i:i+4], byteorder="little")
                  for i in range(0, bytes_read, 4) if i + 4 <= bytes_read]
         
         # Group events by channel

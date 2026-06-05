@@ -1,5 +1,7 @@
 # NEO Seizure Detection
 
+TODO!: Add 2 pltos: python pipeline and the verilog pipeline on the same plot
+
 Run this command to generate 1 minute of synthetic data with seizures:
 
 ```bash 

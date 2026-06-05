@@ -50,7 +50,7 @@ module tb_datapath;
     always #5 clk = ~clk;
 
     // --------------------------------------------------------
-    // Background capture — catches output_valid at ANY cycle
+    // Catches output_valid at ANY cycle
     // --------------------------------------------------------
     reg        cap_valid     = 0;
     reg        cap_event     = 0;
@@ -94,6 +94,28 @@ module tb_datapath;
     end
 
     // --------------------------------------------------------
+    // FIFO Out overflow monitor
+    // Counts output_valid pulses since the last reset. If the count
+    // exceeds FIFO_OUT_DEPTH the PC-side FIFO would overflow and
+    // events would be silently dropped.
+    // --------------------------------------------------------
+    localparam FIFO_OUT_DEPTH = 1024;
+    integer fifo_event_count = 0;
+
+    always @(posedge clk) begin
+        if (!rst_n)
+            fifo_event_count <= 0;
+        else if (output_valid)
+            fifo_event_count <= fifo_event_count + 1;
+    end
+
+    always @(posedge clk) begin
+        if (fifo_event_count > FIFO_OUT_DEPTH)
+            $error("[ASSERT] FIFO Out overflow risk: %0d events since reset exceeds depth=%0d at t=%0t",
+                   fifo_event_count, FIFO_OUT_DEPTH, $time);
+    end
+
+    // --------------------------------------------------------
     // Score
     // --------------------------------------------------------
     integer pass_count = 0;
@@ -113,6 +135,7 @@ module tb_datapath;
     // Stimulus helpers
     // --------------------------------------------------------
     task reset_dut;
+        // Every test starts with this to ensure clean state
         rst_n <= 0; data_valid <= 0;
         repeat (4) @(posedge clk);
         @(negedge clk); rst_n <= 1;
@@ -120,23 +143,25 @@ module tb_datapath;
     endtask
 
     task send_sample(input [5:0] ch, input [15:0] val);
+        // Sends one 16-bit ADC sample on a given channel
         @(posedge clk); data_valid<=1; channel_id<=ch; data<=val;
         @(posedge clk); data_valid<=0;
     endtask
 
     task send_n(input [5:0] ch, input [15:0] val, input integer n);
         integer k;
+        // send_sample n times, baseline, NEO = 0
         for (k = 0; k < n; k = k+1) send_sample(ch, val);
     endtask
 
-    // Alternating spike/mid: keeps NEO = S^2 every other sample.
+    // Alternating spike/mid offsetted: keeps NEO = S^2 every other sample.
     // With S = spike-32768, NEO = S^2 when neighbors are mid (0-centered).
     task send_alternating(input [5:0] ch, input [15:0] spike_val,
                           input [15:0] mid_val, input integer pairs);
         integer k;
         for (k = 0; k < pairs; k = k+1) begin
-            send_sample(ch, spike_val);
-            send_sample(ch, mid_val);
+            send_sample(ch, spike_val); // Spike - 32768
+            send_sample(ch, mid_val); // 32768
         end
     endtask
 
@@ -249,7 +274,7 @@ module tb_datapath;
         drain();
         check("ch0 seizure fired",    cap_valid === 1 && cap_channel === 6'd0);
 
-        // Only ch1 flat — should stay quiet
+        // Only ch1 flat.. should stay quiet
         clear_capture();
         send_n(1, 16'd32768, 20);
         drain();
@@ -314,13 +339,18 @@ module tb_datapath;
         valid_cycles = 0;
         begin : pc
             integer k;
-            for (k = 0; k < 60; k = k+1) begin
+            // for the next 50 cyles
+            for (k = 0; k < 50; k = k+1) begin
                 @(posedge clk);
                 if (output_valid) valid_cycles = valid_cycles + 1;
             end
         end
         check("output_valid ≤1 cycle per event", valid_cycles <= 1);
     endtask
+
+    // --------------------------------------------------------
+    // Overflow Checks
+    // --------------------------------------------------------
 
     // --------------------------------------------------------
     // TEST 9: NEO at ADC rail values (0 and 65535)
