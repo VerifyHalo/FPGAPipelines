@@ -61,14 +61,8 @@ module datapath (
     output reg        detected_debug      // 1 when this NEO sample crosses threshold
 );
 
-    // Sample history for NEO (need 3 consecutive samples)
-    // Store raw 16-bit ADC codes for current channel
-    logic [15:0] sample_history [0:2];  // [prev, curr, next]
     logic [1:0] history_count;          // How many samples we have (0-3)
-    
-    // NEO computation
-    logic signed [16:0] x_prev_signed, x_curr_signed, x_next_signed;
-    logic signed [33:0] curr_sq, neigh_mul;
+
     logic signed [33:0] neo_val;
     logic        [33:0] neo_abs;
     
@@ -95,15 +89,6 @@ module datapath (
     // Raw 16-bit samples per channel for history
     logic [15:0]    channel_sample_history [0:`CHANNELS_PER_PACKET-1][0:2];
     
-    // NEO computation (combinational)
-    // Center around 0 (subtract 32768)
-    assign x_prev_signed = $signed({1'b0, sample_history[0]}) - 17'd32768;
-    assign x_curr_signed = $signed({1'b0, sample_history[1]}) - 17'd32768;
-    assign x_next_signed = $signed({1'b0, sample_history[2]}) - 17'd32768;
-    // Full-precision NEO: psi[n] = x[n]^2 - x[n-1]*x[n+1]
-    assign curr_sq   = x_curr_signed * x_curr_signed;         // 17x17 -> 34 bits
-    assign neigh_mul = x_prev_signed * x_next_signed;         // 17x17 -> 34 bits
-
     // Pipeline registers to break long combinational path:
     // stage 0: per-channel history + raw NEO multiplies
     // stage 1: NEO subtract/abs/threshold
@@ -199,16 +184,20 @@ module datapath (
                     channel_sample_history[channel_id][2] <= data;
                 end
                 
-                // Compute NEO multiplies and register them if we have 3 samples
+                // Compute NEO multiplies and register them if we have 3 samples.
+                // xp/xc/xn are read from this channel's own array and consumed
+                // in this same statement -- no shared combinational net is
+                // written-then-read across channels, so there is no
+                // same-timestep race between interleaved channels.
                 if (history_count >= 2'd3) begin
-                    // Use stored values for NEO computation
-                    sample_history[0] = channel_sample_history[channel_id][0];
-                    sample_history[1] = channel_sample_history[channel_id][1];
-                    sample_history[2] = channel_sample_history[channel_id][2];
+                    logic signed [16:0] xp, xc, xn;
+                    xp = $signed({1'b0, channel_sample_history[channel_id][0]}) - 17'd32768;
+                    xc = $signed({1'b0, channel_sample_history[channel_id][1]}) - 17'd32768;
+                    xn = $signed({1'b0, channel_sample_history[channel_id][2]}) - 17'd32768;
 
                     // Register products for later NEO / threshold stage
-                    curr_sq_pipe       <= curr_sq;
-                    neigh_mul_pipe     <= neigh_mul;
+                    curr_sq_pipe       <= xc * xc;
+                    neigh_mul_pipe     <= xp * xn;
                     channel_id_sq_pipe <= channel_id;
                     data_valid_sq_pipe <= 1'b1;
                 end

@@ -116,6 +116,21 @@ module tb_datapath;
     end
 
     // --------------------------------------------------------
+    // Per-channel event capture (multi-channel / simultaneous tests)
+    // --------------------------------------------------------
+    reg        ev0_seen = 0, ev1_seen = 0;
+    reg [31:0] ch_event_seen = 32'd0;
+    reg        start_seen = 0, end_seen = 0;
+
+    always @(posedge clk) begin
+        if (output_valid && output_channel === 6'd0) ev0_seen <= 1;
+        if (output_valid && output_channel === 6'd1) ev1_seen <= 1;
+        if (output_valid && output_channel < 32)     ch_event_seen[output_channel] <= 1'b1;
+        if (output_valid && output_event)            start_seen <= 1;
+        if (output_valid && !output_event)           end_seen <= 1;
+    end
+
+    // --------------------------------------------------------
     // Score
     // --------------------------------------------------------
     integer pass_count = 0;
@@ -169,6 +184,20 @@ module tb_datapath;
     // plus neo_abs 1-cycle lag = 3 total; give 20 for margin)
     task drain;
         repeat (20) @(posedge clk);
+    endtask
+
+    // A sample only becomes NEO's "center" once 2 more samples arrive after
+    // it (Stage0 evaluates the window that was complete one sample ago).
+    // Each [spike, mid, mid] group is therefore one fully self-flushed,
+    // unambiguous detection: n groups = exactly n detections, no more.
+    task send_isolated(input [5:0] ch, input [15:0] spike_val,
+                       input [15:0] mid_val, input integer n);
+        integer k;
+        for (k = 0; k < n; k = k+1) begin
+            send_sample(ch, spike_val);
+            send_sample(ch, mid_val);
+            send_sample(ch, mid_val);
+        end
     endtask
 
     // --------------------------------------------------------
@@ -432,6 +461,303 @@ module tb_datapath;
         check("KNOWN BUG: seizure end never fires (counter wraps)", cap_valid === 0);
     endtask
 
+    // ==========================================================
+    // GROUP: FSM exact-boundary / off-by-one
+    // detection_counter/continuous_counter compare AFTER increment,
+    // so the true trigger count is (transition_count-1) detections
+    // and exactly window_timeout idle samples, not transition_count.
+    // ==========================================================
+    task test_transition_count_exact_boundary;
+        $display("\n[TEST 12] FSM: fires after exactly transition_count-1 detections");
+        reset_dut(); clear_capture();
+        threshold_value  = 32'd50;
+        window_timeout   = 32'd50;
+        transition_count = 32'd5;
+
+        send_n(0, 16'd32768, 2);
+        send_isolated(0, 16'd33000, 16'd32768, 3);
+        drain();
+        check("not yet fired after 3 of 4 needed detections", cap_valid === 0);
+
+        clear_capture();
+        send_isolated(0, 16'd33000, 16'd32768, 1);
+        drain();
+        check("fires exactly on the 4th detection", cap_valid === 1 && cap_event === 1);
+    endtask
+
+    task test_window_timeout_exact_boundary;
+        $display("\n[TEST 13] FSM: ends after exactly window_timeout idle samples");
+        reset_dut(); clear_capture();
+        threshold_value  = 32'd50;
+        window_timeout   = 32'd10;
+        transition_count = 32'd3;
+
+        send_n(0, 16'd32768, 2);
+        send_isolated(0, 16'd33000, 16'd32768, 2);
+        drain();
+        check("seizure started", cap_valid === 1 && cap_event === 1);
+
+        clear_capture();
+        send_n(0, 16'd32768, 9);
+        drain();
+        check("no end at window_timeout-1", cap_valid === 0);
+
+        send_n(0, 16'd32768, 1);
+        drain();
+        check("end fires exactly at window_timeout", cap_valid === 1 && cap_event === 0);
+    endtask
+
+    task test_threshold_exact_equality;
+        $display("\n[TEST 14] Threshold: NEO == threshold_value must NOT detect (strict >)");
+        reset_dut(); clear_capture();
+        threshold_value  = 32'd10000;
+        window_timeout   = 32'd50;
+        transition_count = 32'd1;
+
+        send_n(0, 16'd32768, 2);
+        send_sample(0, 16'd32868);
+        send_n(0, 16'd32768, 4);
+        drain();
+        check("NEO computes exact value 10000", cap_neo_val === 17'd10000);
+        check("NEO==threshold does not fire (strict >)", cap_valid === 0);
+    endtask
+
+    // ==========================================================
+    // GROUP: Leaky-bucket detection accumulation
+    // detection_counter is NOT reset between detections unless a
+    // gap >= window_timeout occurs; "consecutive" is misleading.
+    // ==========================================================
+    task test_leaky_bucket_gap_preserves_count;
+        $display("\n[TEST 15] Gap < window_timeout: non-consecutive detections still accumulate");
+        reset_dut(); clear_capture();
+        threshold_value  = 32'd50;
+        window_timeout   = 32'd20;
+        transition_count = 32'd3;
+
+        send_n(0, 16'd32768, 2);
+        send_sample(0, 16'd33000);
+        send_n(0, 16'd32768, 10);
+        send_sample(0, 16'd33000);
+        send_n(0, 16'd32768, 3);
+        drain();
+        check("fires from 2 non-consecutive detections", cap_valid === 1 && cap_event === 1);
+    endtask
+
+    task test_leaky_bucket_gap_resets_count;
+        $display("\n[TEST 16] Gap >= window_timeout: detection_counter resets, no false trigger");
+        reset_dut(); clear_capture();
+        threshold_value  = 32'd50;
+        window_timeout   = 32'd20;
+        transition_count = 32'd3;
+
+        send_n(0, 16'd32768, 2);
+        send_sample(0, 16'd33000);
+        send_n(0, 16'd32768, 25);
+        send_sample(0, 16'd33000);
+        send_n(0, 16'd32768, 3);
+        drain();
+        check("no fire: counter reset by timeout gap", cap_valid === 0);
+    endtask
+
+    // ==========================================================
+    // GROUP: Counter-width valid boundaries (complements TEST 10/11,
+    // which only prove the failure just past these limits)
+    // ==========================================================
+    task test_transition_count_max_valid_256;
+        $display("\n[TEST 17] transition_count=256 (8-bit boundary): must still fire correctly");
+        reset_dut(); clear_capture();
+        threshold_value  = 32'd50;
+        window_timeout   = 32'd500;
+        transition_count = 32'd256;
+
+        send_n(0, 16'd32768, 2);
+        send_isolated(0, 16'd33000, 16'd32768, 254);
+        drain();
+        check("not yet fired after 254 detections", cap_valid === 0);
+
+        clear_capture();
+        send_isolated(0, 16'd33000, 16'd32768, 1);
+        drain();
+        check("fires exactly at 255 detections (8-bit max)", cap_valid === 1 && cap_event === 1);
+    endtask
+
+    task test_window_timeout_max_valid_65535;
+        integer k;
+        $display("\n[TEST 18] window_timeout=65535 (16-bit boundary): must still end correctly");
+        reset_dut(); clear_capture();
+        threshold_value  = 32'd50;
+        window_timeout   = 32'd65535;
+        transition_count = 32'd3;
+
+        send_n(0, 16'd32768, 2);
+        send_isolated(0, 16'd33000, 16'd32768, 2);
+        drain();
+        check("seizure started", cap_valid === 1 && cap_event === 1);
+
+        clear_capture();
+        for (k = 0; k < 65535; k = k+1) send_sample(0, 16'd32768);
+        drain();
+        check("end fires exactly at 16-bit max window_timeout", cap_valid === 1 && cap_event === 0);
+    endtask
+
+    // ==========================================================
+    // GROUP: Reset & pipeline integrity
+    // ==========================================================
+    task test_reset_midflight_pipeline;
+        $display("\n[TEST 19] Reset asserted while a sample is still mid-pipeline (not drained)");
+        reset_dut();
+        threshold_value  = 32'd50;
+        window_timeout   = 32'd50;
+        transition_count = 32'd3;
+
+        send_n(0, 16'd32768, 2);
+        send_sample(0, 16'd33000);
+        rst_n <= 0; repeat (4) @(posedge clk); rst_n <= 1; @(posedge clk);
+
+        clear_capture();
+        send_n(0, 16'd32768, 15);
+        drain();
+        check("no stale output after reset with in-flight sample", cap_valid === 0);
+    endtask
+
+    // ==========================================================
+    // GROUP: Output correctness
+    // ==========================================================
+    task test_output_timestamp_value;
+        $display("\n[TEST 20] output_timestamp reflects the exact triggering sample count");
+        reset_dut(); clear_capture();
+        threshold_value  = 32'd50;
+        window_timeout   = 32'd50;
+        transition_count = 32'd3;
+
+        send_n(0, 16'd32768, 2);
+        send_isolated(0, 16'd33000, 16'd32768, 2);
+        drain();
+        check("seizure start fires", cap_valid === 1 && cap_event === 1);
+        check("timestamp equals exact sample count at trigger", cap_timestamp === 32'd8);
+    endtask
+
+    // ==========================================================
+    // GROUP: NEO edge-case arithmetic
+    // ==========================================================
+    task test_neo_aliasing_false_negative;
+        $display("\n[TEST 21] NEO aliasing: non-constant geometric triple also yields NEO=0");
+        reset_dut(); clear_capture();
+        threshold_value  = 32'd1;
+        window_timeout   = 32'd50;
+        transition_count = 32'd1;
+
+        send_sample(0, 16'd32769);  // centered 1
+        send_sample(0, 16'd32770);  // centered 2
+        send_sample(0, 16'd32772);  // centered 4: 2^2 == 1*4 -> NEO=0
+        send_sample(0, 16'd32776);  // centered 8: only needed to flush the (1,2,4) window
+        drain();
+        check("no detection on non-constant NEO-aliased triple", cap_valid === 0);
+    endtask
+
+    // ==========================================================
+    // GROUP: Channel handling & multi-channel scale
+    // ==========================================================
+    task test_channel_id_out_of_range_isolation;
+        $display("\n[TEST 22] Out-of-range channel_id (32-63) does not corrupt valid channels");
+        reset_dut(); clear_capture();
+        threshold_value  = 32'd50;
+        window_timeout   = 32'd50;
+        transition_count = 32'd3;
+
+        send_n(6'd40, 16'd33000, 10);
+        drain();
+        check("no spurious output from OOB channel_id", cap_valid === 0);
+
+        clear_capture();
+        send_n(0, 16'd32768, 2);
+        send_alternating(0, 16'd33000, 16'd32768, 8);
+        drain();
+        check("channel 0 still works correctly after OOB traffic", cap_valid === 1 && cap_channel === 6'd0);
+    endtask
+
+    task test_simultaneous_channel_events;
+        integer k;
+        $display("\n[TEST 23] Adjacent-cycle events on two channels are both reported");
+        reset_dut();
+        threshold_value  = 32'd50;
+        window_timeout   = 32'd50;
+        transition_count = 32'd3;
+        ev0_seen = 0; ev1_seen = 0;
+
+        send_n(0, 16'd32768, 2);
+        send_n(1, 16'd32768, 2);
+        for (k = 0; k < 2; k = k+1) begin
+            send_sample(0, 16'd33000);
+            send_sample(1, 16'd33000);
+            send_sample(0, 16'd32768);
+            send_sample(1, 16'd32768);
+            send_sample(0, 16'd32768);
+            send_sample(1, 16'd32768);
+        end
+        drain();
+        check("channel 0 event reported", ev0_seen === 1);
+        check("channel 1 event reported", ev1_seen === 1);
+    endtask
+
+    task test_all_channels_concurrent;
+        integer ch, k;
+        $display("\n[TEST 26] All 32 channels driven concurrently each reach seizure independently");
+        reset_dut();
+        threshold_value  = 32'd50;
+        window_timeout   = 32'd500;
+        transition_count = 32'd3;
+        ch_event_seen = 32'd0;
+
+        for (ch = 0; ch < 32; ch = ch+1) begin
+            send_sample(ch, 16'd32768);
+            send_sample(ch, 16'd32768);
+        end
+        for (k = 0; k < 4; k = k+1)
+            for (ch = 0; ch < 32; ch = ch+1)
+                send_sample(ch, (k[0] ? 16'd32768 : 16'd33000));
+        drain();
+        check("all 32 channels independently fire seizure start", &ch_event_seen === 1'b1);
+    endtask
+
+    // ==========================================================
+    // GROUP: Degenerate configuration
+    // ==========================================================
+    task test_transition_count_zero;
+        $display("\n[TEST 24] Degenerate config: transition_count=0 never fires (underflow)");
+        reset_dut(); clear_capture();
+        threshold_value  = 32'd50;
+        window_timeout   = 32'd50;
+        transition_count = 32'd0;
+
+        send_n(0, 16'd32768, 2);
+        send_alternating(0, 16'd33000, 16'd32768, 20);
+        drain();
+        check("transition_count=0 never fires", cap_valid === 0);
+    endtask
+
+    task test_window_timeout_zero;
+        $display("\n[TEST 25] Degenerate config: window_timeout=0 ends seizure on first idle sample");
+        reset_dut(); clear_capture();
+        threshold_value  = 32'd50;
+        window_timeout   = 32'd0;
+        transition_count = 32'd3;
+        start_seen = 0; end_seen = 0;
+
+        // window_timeout=0 resets detection_counter on any gap, so the
+        // trigger needs zero-gap (alternating) detections. The very next
+        // evaluated idle sample -- even the trigger's own flush sample --
+        // ends the seizure immediately, so start and end both land here.
+        send_n(0, 16'd32768, 2);
+        send_sample(0, 16'd33000);
+        send_sample(0, 16'd32768);
+        send_sample(0, 16'd33000);
+        send_n(0, 16'd32768, 3);
+        drain();
+        check("seizure started", start_seen === 1);
+        check("ends immediately with window_timeout=0", end_seen === 1);
+    endtask
+
     // --------------------------------------------------------
     // Run
     // --------------------------------------------------------
@@ -451,6 +777,21 @@ module tb_datapath;
         test_neo_rail_values();
         test_detection_counter_overflow();
         test_continuous_counter_overflow();
+        test_transition_count_exact_boundary();
+        test_window_timeout_exact_boundary();
+        test_threshold_exact_equality();
+        test_leaky_bucket_gap_preserves_count();
+        test_leaky_bucket_gap_resets_count();
+        test_transition_count_max_valid_256();
+        test_window_timeout_max_valid_65535();
+        test_reset_midflight_pipeline();
+        test_output_timestamp_value();
+        test_neo_aliasing_false_negative();
+        test_channel_id_out_of_range_isolation();
+        test_simultaneous_channel_events();
+        test_transition_count_zero();
+        test_window_timeout_zero();
+        test_all_channels_concurrent();
 
         $display("\n====== RESULTS: %0d passed, %0d failed ======",
                  pass_count, fail_count);

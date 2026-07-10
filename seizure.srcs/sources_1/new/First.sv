@@ -144,16 +144,22 @@ end
 // FIFO Logic                                   //
 // -------------------------------------------- //
 
+// Hard backstop: never let a write reach the FIFO while full, regardless of
+// how fast the host bursts. With the drain fix below this should never
+// actually engage in steady state, but it turns a would-be pointer
+// corruption into a bounded, detectable drop instead.
+wire fifoInWriteGated_w = fifoInWrite_ri && !fifoInFull_ro;
+
 // Instantiate FIFO In
 fifo_generator_0 fifoIn (
     .clk (okClk),               // in (global okHost CLK)
     .srst (reset_ro),           // in (okReset configurable 0x00 wire signal)
     // write in from pipe (PC syscall)
     .din (fifoInDataIn_w),      // in (data from pipe80 handled by okHost)
-    .wr_en (fifoInWrite_ri),    // in (signal from pipe80 for FIFO rd)
-    // edge signals 
-    .full (fifoInFull_ro),      // out (FIFO signal, not used -> safe)
-    .empty (fifoInEmpty_ro),    // out (FIFO signal, used by CTL to wait for FIFO data)
+    .wr_en (fifoInWriteGated_w),// in (signal from pipe80 for FIFO wr, full-gated)
+    // edge signals
+    .full (fifoInFull_ro),      // out (gates wr_en above)
+    .empty (fifoInEmpty_ro),    // out (used by CTL to wait for FIFO data)
     // read out
     .dout (fifoInDataOut_ro),   // out (FIFO data out on fifoInRead_ri request)
     .rd_en (fifoInRead_ri)      // in (CTL inquery for FIFO next cycle data out)
@@ -220,29 +226,29 @@ datapath seizure_detection (
 //   [21:16] : channel_id (0-31)
 //   other bits are currently unused.
 
-reg in_wait_data_ro = 1'b0;
+// Streaming drain: the FIFO has a fixed 1-cycle read latency, but that is
+// latency, not a per-word stall -- a new rd_en can be issued every cycle
+// while data is available, pipelining requests to sustain 1 word/cycle.
+// fifo_in_rd_pending_ro remembers whether *last* cycle's request is the one
+// landing on fifoInDataOut_ro *this* cycle, since dout is not readable until
+// one cycle after the request that produced it.
+reg fifo_in_rd_pending_ro = 1'b0;
 
 always @ (posedge okClk) begin
-    fifoInRead_ri    <= 1'b0;
-    dp_data_valid_ro <= 1'b0;
-
     if (reset_ro) begin
-        in_wait_data_ro <= 1'b0;
-        dp_data_ro       <= 16'd0;
-        dp_channel_id_ro <= 6'd0;
+        fifoInRead_ri          <= 1'b0;
+        fifo_in_rd_pending_ro  <= 1'b0;
+        dp_data_valid_ro       <= 1'b0;
+        dp_data_ro             <= 16'd0;
+        dp_channel_id_ro       <= 6'd0;
     end else begin
-        if (!in_wait_data_ro) begin
-            if (!fifoInEmpty_ro) begin
-                // Request next word from FIFO
-                fifoInRead_ri    <= 1'b1;
-                in_wait_data_ro  <= 1'b1;
-            end
-        end else begin
-            // Data from previous read is now valid on fifoInDataOut_ro
+        fifoInRead_ri         <= !fifoInEmpty_ro;
+        fifo_in_rd_pending_ro <= fifoInRead_ri;
+
+        dp_data_valid_ro <= fifo_in_rd_pending_ro;
+        if (fifo_in_rd_pending_ro) begin
             dp_data_ro       <= fifoInDataOut_ro[15:0];
             dp_channel_id_ro <= fifoInDataOut_ro[21:16];
-            dp_data_valid_ro <= 1'b1;
-            in_wait_data_ro  <= 1'b0;
         end
     end
 end
